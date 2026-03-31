@@ -6,16 +6,16 @@ A personal CLI utility belt — a single binary with a growing suite of everyday
 
 ### Download a release
 
-Grab the latest binary for your platform from the [Releases](../../releases) page and put it somewhere on your `$PATH`:
+**macOS / Linux:**
 
 ```sh
-# macOS
-curl -L https://github.com/mateusdeitos/cli-utility-belt/releases/latest/download/belt-darwin-arm64 -o belt
-chmod +x belt && mv belt /usr/local/bin/belt
+curl -fsSL https://raw.githubusercontent.com/mateusdeitos/cli-utility-belt/main/install.sh | sh
+```
 
-# Linux
-curl -L https://github.com/mateusdeitos/cli-utility-belt/releases/latest/download/belt-linux-amd64 -o belt
-chmod +x belt && mv belt /usr/local/bin/belt
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/mateusdeitos/cli-utility-belt/main/install.ps1 | iex
 ```
 
 ### Build from source
