@@ -1,0 +1,24 @@
+openspec
+.claude
+
+# Compiled binaries
+belt
+belt-linux-amd64
+belt-darwin-amd64
+belt-windows-amd64.exe
+*.exe
+
+# Go build/test artifacts
+vendor/
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

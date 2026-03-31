@@ -1,0 +1,40 @@
+name: Release Draft
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete any existing draft release to avoid duplicates
+          gh release list --json tagName,isDraft \
+            | jq -r '.[] | select(.isDraft) | .tagName' \
+            | xargs -I{} gh release delete {} --yes --cleanup-tag 2>/dev/null || true
+
+          # Create a new draft release tagged with the short SHA
+          TAG="draft-$(git rev-parse --short HEAD)"
+          gh release create "$TAG" \
+            --draft \
+            --title "Draft Release ($TAG)" \
+            --notes "Automated draft — publish to trigger binary builds."
