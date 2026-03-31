@@ -2,40 +2,42 @@ package cmd
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 type syncChildConfig struct {
-	Tag           string   `json:"tag"`
+	Name          string   `json:"name"`
 	BaseBranches  []string `json:"base_branches"`
 	ChildBranches []string `json:"child_branches"`
 }
+
+// syncConfigStore maps: directory path -> config name -> config.
+type syncConfigStore map[string]map[string]syncChildConfig
 
 var syncUpdate bool
 var syncAddBranch string
 var syncAddCurrentBranch bool
 var syncList bool
 var syncRemoveBranch string
-var syncTag string
+var syncName string
 
 var syncChildBranchesCmd = &cobra.Command{
 	Use:   "sync-child-branches",
 	Short: "Merge base branches into child branches and push",
 	Long: `Merges a set of base branches into each child branch, then pushes.
 
-Configs are stored per-directory in ~/.belt/git-sync-child-branches/.
-Multiple tagged configs can coexist in the same directory.
-On first run you will be prompted for a tag name, base branches, and child branches.
-Use --tag to target a specific config, --update to reconfigure.`,
+Configs are stored in ~/.belt/git-sync-child-branches.json, keyed by directory path and config name.
+Multiple named configs can coexist in the same directory.
+On first run you will be prompted for a name, base branches, and child branches.
+Use --name to target a specific config, --update to reconfigure.`,
 	RunE: runSyncChildBranches,
 }
 
@@ -45,65 +47,59 @@ func init() {
 	syncChildBranchesCmd.Flags().BoolVar(&syncAddCurrentBranch, "add-current-branch", false, "Add the current git branch to the child branches list")
 	syncChildBranchesCmd.Flags().BoolVar(&syncList, "list", false, "List configured base and child branches")
 	syncChildBranchesCmd.Flags().StringVar(&syncRemoveBranch, "remove", "", "Remove a branch from the child branches list")
-	syncChildBranchesCmd.Flags().StringVar(&syncTag, "tag", "", "Target a specific config by tag name")
+	syncChildBranchesCmd.Flags().StringVar(&syncName, "name", "", "Target a specific config by name")
 	gitCmd.AddCommand(syncChildBranchesCmd)
 }
 
-// syncConfigDir returns the directory that holds all tagged configs for the current working directory.
-func syncConfigDir() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
+func syncStorePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256([]byte(cwd))
-	key := hex.EncodeToString(h[:8])
-	return filepath.Join(home, ".belt", "git-sync-child-branches", key), nil
+	return filepath.Join(home, ".belt", "git-sync-child-branches.json"), nil
 }
 
-func syncConfigPathForTag(dir, tag string) string {
-	return filepath.Join(dir, tag+".json")
-}
-
-// listConfigTags returns all tag names that have a saved config in dir.
-func listConfigTags(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var tags []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			tags = append(tags, strings.TrimSuffix(e.Name(), ".json"))
-		}
-	}
-	return tags, nil
-}
-
-func loadSyncConfig(path string) (*syncChildConfig, error) {
+func loadStore(path string) (syncConfigStore, error) {
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return make(syncConfigStore), nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	var cfg syncChildConfig
-	return &cfg, json.Unmarshal(data, &cfg)
+	var store syncConfigStore
+	return store, json.Unmarshal(data, &store)
 }
 
-func saveSyncConfig(path string, cfg *syncChildConfig) error {
+func saveStore(path string, store syncConfigStore) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+func listNames(store syncConfigStore, cwd string) []string {
+	configs, ok := store[cwd]
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func setConfig(store syncConfigStore, cwd string, cfg syncChildConfig) {
+	if store[cwd] == nil {
+		store[cwd] = make(map[string]syncChildConfig)
+	}
+	store[cwd][cfg.Name] = cfg
 }
 
 func promptLine(r *bufio.Reader, prompt string) (string, error) {
@@ -126,11 +122,10 @@ func promptCSV(r *bufio.Reader, prompt string) ([]string, error) {
 	return result, nil
 }
 
-// selectTag presents a numbered list of tags and returns the one the user picks.
-func selectTag(r *bufio.Reader, tags []string) (string, error) {
+func selectName(r *bufio.Reader, names []string) (string, error) {
 	fmt.Println("Multiple configs found. Select one:")
-	for i, t := range tags {
-		fmt.Printf("  [%d] %s\n", i+1, t)
+	for i, n := range names {
+		fmt.Printf("  [%d] %s\n", i+1, n)
 	}
 	for {
 		raw, err := promptLine(r, "Enter number: ")
@@ -138,43 +133,44 @@ func selectTag(r *bufio.Reader, tags []string) (string, error) {
 			return "", err
 		}
 		var n int
-		if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n < 1 || n > len(tags) {
-			fmt.Printf("Please enter a number between 1 and %d.\n", len(tags))
+		if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n < 1 || n > len(names) {
+			fmt.Printf("Please enter a number between 1 and %d.\n", len(names))
 			continue
 		}
-		return tags[n-1], nil
+		return names[n-1], nil
 	}
 }
 
-// resolveConfig loads the config to operate on, handling tag selection when needed.
-// Returns the config, its file path, and any load error (nil means config was loaded successfully).
-func resolveConfig(reader *bufio.Reader, dir string) (*syncChildConfig, string, error) {
-	if syncTag != "" {
-		path := syncConfigPathForTag(dir, syncTag)
-		cfg, err := loadSyncConfig(path)
-		return cfg, path, err
+// resolveConfig returns the config to operate on and its name.
+// Returns os.ErrNotExist if no config is found.
+func resolveConfig(reader *bufio.Reader, store syncConfigStore, cwd string) (*syncChildConfig, string, error) {
+	if syncName != "" {
+		configs, ok := store[cwd]
+		if !ok {
+			return nil, "", os.ErrNotExist
+		}
+		cfg, ok := configs[syncName]
+		if !ok {
+			return nil, "", os.ErrNotExist
+		}
+		return &cfg, syncName, nil
 	}
 
-	tags, err := listConfigTags(dir)
-	if err != nil {
-		return nil, "", err
-	}
+	names := listNames(store, cwd)
 
-	switch len(tags) {
+	switch len(names) {
 	case 0:
 		return nil, "", os.ErrNotExist
 	case 1:
-		path := syncConfigPathForTag(dir, tags[0])
-		cfg, err := loadSyncConfig(path)
-		return cfg, path, err
+		cfg := store[cwd][names[0]]
+		return &cfg, names[0], nil
 	default:
-		tag, err := selectTag(reader, tags)
+		name, err := selectName(reader, names)
 		if err != nil {
 			return nil, "", err
 		}
-		path := syncConfigPathForTag(dir, tag)
-		cfg, err := loadSyncConfig(path)
-		return cfg, path, err
+		cfg := store[cwd][name]
+		return &cfg, name, nil
 	}
 }
 
@@ -191,19 +187,29 @@ func gitOutputStr(args ...string) (string, error) {
 }
 
 func runSyncChildBranches(_ *cobra.Command, _ []string) error {
-	dir, err := syncConfigDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	storePath, err := syncStorePath()
+	if err != nil {
+		return err
+	}
+
+	store, err := loadStore(storePath)
 	if err != nil {
 		return err
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	cfg, cfgPath, loadErr := resolveConfig(reader, dir)
+	cfg, _, loadErr := resolveConfig(reader, store, cwd)
 
 	if syncList {
 		if loadErr != nil {
 			return fmt.Errorf("no config found for this directory — run without flags first to set it up")
 		}
-		fmt.Printf("Tag: %s\n", cfg.Tag)
+		fmt.Printf("Name: %s\n", cfg.Name)
 		fmt.Println("Base branches:")
 		for _, b := range cfg.BaseBranches {
 			fmt.Printf("  - %s\n", b)
@@ -232,7 +238,8 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("branch %q not found in child branches list", syncRemoveBranch)
 		}
 		cfg.ChildBranches = filtered
-		if err := saveSyncConfig(cfgPath, cfg); err != nil {
+		setConfig(store, cwd, *cfg)
+		if err := saveStore(storePath, store); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
 		fmt.Printf("Removed %q from child branches.\n", syncRemoveBranch)
@@ -261,7 +268,8 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 			}
 		}
 		cfg.ChildBranches = append(cfg.ChildBranches, syncAddBranch)
-		if err := saveSyncConfig(cfgPath, cfg); err != nil {
+		setConfig(store, cwd, *cfg)
+		if err := saveStore(storePath, store); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
 		fmt.Printf("Added %q to child branches.\n", syncAddBranch)
@@ -272,18 +280,18 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 		if loadErr != nil {
 			fmt.Println("No config found for this directory. Let's set it up.")
 		} else {
-			fmt.Printf("Updating config %q for this directory.\n", cfg.Tag)
+			fmt.Printf("Updating config %q for this directory.\n", cfg.Name)
 		}
 
-		tag := syncTag
-		if tag == "" {
+		name := syncName
+		if name == "" {
 			var err error
-			tag, err = promptLine(reader, "Config tag (a short name to identify this config): ")
+			name, err = promptLine(reader, "Config name (a short name to identify this config): ")
 			if err != nil {
 				return err
 			}
-			if tag == "" {
-				return fmt.Errorf("tag cannot be empty")
+			if name == "" {
+				return fmt.Errorf("name cannot be empty")
 			}
 		}
 
@@ -296,16 +304,17 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 			return err
 		}
 
-		cfg = &syncChildConfig{
-			Tag:           tag,
+		newCfg := syncChildConfig{
+			Name:          name,
 			BaseBranches:  baseBranches,
 			ChildBranches: childBranches,
 		}
-		cfgPath = syncConfigPathForTag(dir, tag)
-		if err := saveSyncConfig(cfgPath, cfg); err != nil {
+		setConfig(store, cwd, newCfg)
+		if err := saveStore(storePath, store); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
-		fmt.Printf("Config %q saved.\n\n", tag)
+		cfg = &newCfg
+		fmt.Printf("Config %q saved.\n\n", name)
 	}
 
 	if len(cfg.BaseBranches) == 0 {

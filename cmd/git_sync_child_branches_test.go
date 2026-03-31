@@ -10,131 +10,138 @@ import (
 
 // helpers
 
-func writeConfig(t *testing.T, dir, tag string, cfg syncChildConfig) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+func makeStore(entries map[string]map[string]syncChildConfig) syncConfigStore {
+	store := make(syncConfigStore)
+	for cwd, configs := range entries {
+		store[cwd] = configs
 	}
-	if err := saveSyncConfig(syncConfigPathForTag(dir, tag), &cfg); err != nil {
-		t.Fatalf("saveSyncConfig: %v", err)
-	}
+	return store
 }
 
 func reader(input string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(input))
 }
 
-// syncConfigPathForTag
+// listNames
 
-func TestSyncConfigPathForTag(t *testing.T) {
-	got := syncConfigPathForTag("/base/dir", "my-tag")
-	want := "/base/dir/my-tag.json"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+func TestListNames_NoCWDEntry(t *testing.T) {
+	store := make(syncConfigStore)
+	names := listNames(store, "/some/path")
+	if len(names) != 0 {
+		t.Errorf("expected empty, got %v", names)
 	}
 }
 
-// listConfigTags
-
-func TestListConfigTags_EmptyDir(t *testing.T) {
-	dir := t.TempDir()
-	tags, err := listConfigTags(dir)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(tags) != 0 {
-		t.Errorf("expected empty, got %v", tags)
+func TestListNames_SingleEntry(t *testing.T) {
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {"prod": {Name: "prod"}},
+	})
+	names := listNames(store, "/repo")
+	if len(names) != 1 || names[0] != "prod" {
+		t.Errorf("expected [prod], got %v", names)
 	}
 }
 
-func TestListConfigTags_NonExistentDir(t *testing.T) {
-	tags, err := listConfigTags("/does/not/exist/ever")
-	if err != nil {
-		t.Fatalf("expected nil error for missing dir, got %v", err)
-	}
-	if len(tags) != 0 {
-		t.Errorf("expected empty, got %v", tags)
-	}
-}
-
-func TestListConfigTags_IgnoresNonJSON(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignore me"), 0o644)
-	os.WriteFile(filepath.Join(dir, "subdir"), []byte{}, 0o644)
-	writeConfig(t, dir, "valid", syncChildConfig{Tag: "valid"})
-
-	tags, err := listConfigTags(dir)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(tags) != 1 || tags[0] != "valid" {
-		t.Errorf("expected [valid], got %v", tags)
+func TestListNames_MultipleEntries_Sorted(t *testing.T) {
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {
+			"gamma": {Name: "gamma"},
+			"alpha": {Name: "alpha"},
+			"beta":  {Name: "beta"},
+		},
+	})
+	names := listNames(store, "/repo")
+	want := []string{"alpha", "beta", "gamma"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("got %v, want %v", names, want)
 	}
 }
 
-func TestListConfigTags_MultipleTags(t *testing.T) {
-	dir := t.TempDir()
-	writeConfig(t, dir, "alpha", syncChildConfig{Tag: "alpha"})
-	writeConfig(t, dir, "beta", syncChildConfig{Tag: "beta"})
-	writeConfig(t, dir, "gamma", syncChildConfig{Tag: "gamma"})
+// saveStore / loadStore round-trip
 
-	tags, err := listConfigTags(dir)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(tags) != 3 {
-		t.Errorf("expected 3 tags, got %v", tags)
-	}
-}
+func TestSaveAndLoadStore_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.json")
+	original := makeStore(map[string]map[string]syncChildConfig{
+		"/repo/a": {
+			"prod": {
+				Name:          "prod",
+				BaseBranches:  []string{"main"},
+				ChildBranches: []string{"feat-a", "feat-b"},
+			},
+		},
+	})
 
-// saveSyncConfig / loadSyncConfig round-trip
-
-func TestSaveAndLoadConfig_RoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := syncConfigPathForTag(dir, "test")
-	original := &syncChildConfig{
-		Tag:           "test",
-		BaseBranches:  []string{"main", "develop"},
-		ChildBranches: []string{"feat-a", "feat-b"},
-	}
-
-	if err := saveSyncConfig(path, original); err != nil {
+	if err := saveStore(path, original); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	loaded, err := loadSyncConfig(path)
+	loaded, err := loadStore(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 
-	if loaded.Tag != original.Tag {
-		t.Errorf("Tag: got %q, want %q", loaded.Tag, original.Tag)
+	cfg, ok := loaded["/repo/a"]["prod"]
+	if !ok {
+		t.Fatal("expected /repo/a -> prod entry")
 	}
-	if strings.Join(loaded.BaseBranches, ",") != strings.Join(original.BaseBranches, ",") {
-		t.Errorf("BaseBranches: got %v, want %v", loaded.BaseBranches, original.BaseBranches)
+	if cfg.Name != "prod" {
+		t.Errorf("Name: got %q, want %q", cfg.Name, "prod")
 	}
-	if strings.Join(loaded.ChildBranches, ",") != strings.Join(original.ChildBranches, ",") {
-		t.Errorf("ChildBranches: got %v, want %v", loaded.ChildBranches, original.ChildBranches)
+	if strings.Join(cfg.BaseBranches, ",") != "main" {
+		t.Errorf("BaseBranches: got %v", cfg.BaseBranches)
 	}
-}
-
-func TestLoadSyncConfig_FileNotFound(t *testing.T) {
-	_, err := loadSyncConfig("/does/not/exist.json")
-	if err == nil {
-		t.Error("expected error for missing file, got nil")
+	if strings.Join(cfg.ChildBranches, ",") != "feat-a,feat-b" {
+		t.Errorf("ChildBranches: got %v", cfg.ChildBranches)
 	}
 }
 
-func TestSaveSyncConfig_CreatesParentDirs(t *testing.T) {
-	base := t.TempDir()
-	path := filepath.Join(base, "a", "b", "c", "tag.json")
-	cfg := &syncChildConfig{Tag: "tag"}
+func TestLoadStore_FileNotFound_ReturnsEmptyStore(t *testing.T) {
+	store, err := loadStore("/does/not/exist.json")
+	if err != nil {
+		t.Fatalf("expected nil error for missing file, got %v", err)
+	}
+	if len(store) != 0 {
+		t.Errorf("expected empty store, got %v", store)
+	}
+}
 
-	if err := saveSyncConfig(path, cfg); err != nil {
+func TestSaveStore_CreatesParentDirs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a", "b", "store.json")
+	store := make(syncConfigStore)
+
+	if err := saveStore(path, store); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("file not created: %v", err)
+	}
+}
+
+// setConfig
+
+func TestSetConfig_CreatesEntry(t *testing.T) {
+	store := make(syncConfigStore)
+	cfg := syncChildConfig{Name: "dev", BaseBranches: []string{"main"}}
+	setConfig(store, "/repo", cfg)
+
+	got, ok := store["/repo"]["dev"]
+	if !ok {
+		t.Fatal("expected entry to be created")
+	}
+	if got.Name != "dev" {
+		t.Errorf("Name: got %q, want %q", got.Name, "dev")
+	}
+}
+
+func TestSetConfig_OverwritesExisting(t *testing.T) {
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {"dev": {Name: "dev", BaseBranches: []string{"old"}}},
+	})
+	setConfig(store, "/repo", syncChildConfig{Name: "dev", BaseBranches: []string{"new"}})
+
+	got := store["/repo"]["dev"]
+	if strings.Join(got.BaseBranches, ",") != "new" {
+		t.Errorf("expected updated BaseBranches, got %v", got.BaseBranches)
 	}
 }
 
@@ -183,11 +190,11 @@ func TestPromptCSV_SkipsEmptyEntries(t *testing.T) {
 	}
 }
 
-// selectTag
+// selectName
 
-func TestSelectTag_ValidSelection(t *testing.T) {
-	tags := []string{"alpha", "beta", "gamma"}
-	got, err := selectTag(reader("2\n"), tags)
+func TestSelectName_ValidSelection(t *testing.T) {
+	names := []string{"alpha", "beta", "gamma"}
+	got, err := selectName(reader("2\n"), names)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -196,10 +203,9 @@ func TestSelectTag_ValidSelection(t *testing.T) {
 	}
 }
 
-func TestSelectTag_RetriesOnInvalidInput(t *testing.T) {
-	tags := []string{"alpha", "beta"}
-	// first two inputs are invalid, third is valid
-	got, err := selectTag(reader("0\n99\n1\n"), tags)
+func TestSelectName_RetriesOnInvalidInput(t *testing.T) {
+	names := []string{"alpha", "beta"}
+	got, err := selectName(reader("0\n99\n1\n"), names)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,9 +214,9 @@ func TestSelectTag_RetriesOnInvalidInput(t *testing.T) {
 	}
 }
 
-func TestSelectTag_FirstEntry(t *testing.T) {
-	tags := []string{"only-one"}
-	got, err := selectTag(reader("1\n"), tags)
+func TestSelectName_FirstEntry(t *testing.T) {
+	names := []string{"only-one"}
+	got, err := selectName(reader("1\n"), names)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,90 +228,84 @@ func TestSelectTag_FirstEntry(t *testing.T) {
 // resolveConfig
 
 func TestResolveConfig_NoConfigs(t *testing.T) {
-	dir := t.TempDir()
-	syncTag = ""
-	t.Cleanup(func() { syncTag = "" })
+	syncName = ""
+	t.Cleanup(func() { syncName = "" })
 
-	_, _, err := resolveConfig(reader(""), dir)
+	store := make(syncConfigStore)
+	_, _, err := resolveConfig(reader(""), store, "/repo")
 	if !os.IsNotExist(err) {
 		t.Errorf("expected ErrNotExist, got %v", err)
 	}
 }
 
 func TestResolveConfig_SingleConfig_AutoSelected(t *testing.T) {
-	dir := t.TempDir()
-	syncTag = ""
-	t.Cleanup(func() { syncTag = "" })
+	syncName = ""
+	t.Cleanup(func() { syncName = "" })
 
-	writeConfig(t, dir, "prod", syncChildConfig{
-		Tag:           "prod",
-		BaseBranches:  []string{"main"},
-		ChildBranches: []string{"feat-x"},
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {"prod": {Name: "prod", BaseBranches: []string{"main"}, ChildBranches: []string{"feat-x"}}},
 	})
 
-	cfg, path, err := resolveConfig(reader(""), dir)
+	cfg, name, err := resolveConfig(reader(""), store, "/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Tag != "prod" {
-		t.Errorf("Tag: got %q, want %q", cfg.Tag, "prod")
+	if cfg.Name != "prod" {
+		t.Errorf("Name: got %q, want %q", cfg.Name, "prod")
 	}
-	if !strings.HasSuffix(path, "prod.json") {
-		t.Errorf("unexpected path: %s", path)
+	if name != "prod" {
+		t.Errorf("returned name: got %q, want %q", name, "prod")
 	}
 }
 
 func TestResolveConfig_MultipleConfigs_PromptSelection(t *testing.T) {
-	dir := t.TempDir()
-	syncTag = ""
-	t.Cleanup(func() { syncTag = "" })
+	syncName = ""
+	t.Cleanup(func() { syncName = "" })
 
-	writeConfig(t, dir, "staging", syncChildConfig{Tag: "staging"})
-	writeConfig(t, dir, "prod", syncChildConfig{Tag: "prod"})
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {
+			"prod":    {Name: "prod"},
+			"staging": {Name: "staging"},
+		},
+	})
 
-	// Tags are returned in directory order (alphabetical); "prod" is [1], "staging" is [2]
-	tags, _ := listConfigTags(dir)
-	var selectionIndex string
-	for i, tag := range tags {
-		if tag == "staging" {
-			selectionIndex = string(rune('1' + i))
-			break
-		}
-	}
-
-	cfg, _, err := resolveConfig(reader(selectionIndex+"\n"), dir)
+	// listNames returns sorted, so "prod" is [1], "staging" is [2]
+	cfg, _, err := resolveConfig(reader("2\n"), store, "/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Tag != "staging" {
-		t.Errorf("Tag: got %q, want %q", cfg.Tag, "staging")
+	if cfg.Name != "staging" {
+		t.Errorf("Name: got %q, want %q", cfg.Name, "staging")
 	}
 }
 
-func TestResolveConfig_TagFlag_BypassesSelection(t *testing.T) {
-	dir := t.TempDir()
-	syncTag = "prod"
-	t.Cleanup(func() { syncTag = "" })
+func TestResolveConfig_NameFlag_BypassesSelection(t *testing.T) {
+	syncName = "prod"
+	t.Cleanup(func() { syncName = "" })
 
-	writeConfig(t, dir, "staging", syncChildConfig{Tag: "staging"})
-	writeConfig(t, dir, "prod", syncChildConfig{Tag: "prod", BaseBranches: []string{"main"}})
+	store := makeStore(map[string]map[string]syncChildConfig{
+		"/repo": {
+			"prod":    {Name: "prod", BaseBranches: []string{"main"}},
+			"staging": {Name: "staging"},
+		},
+	})
 
-	cfg, _, err := resolveConfig(reader(""), dir)
+	cfg, _, err := resolveConfig(reader(""), store, "/repo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Tag != "prod" {
-		t.Errorf("Tag: got %q, want %q", cfg.Tag, "prod")
+	if cfg.Name != "prod" {
+		t.Errorf("Name: got %q, want %q", cfg.Name, "prod")
 	}
 }
 
-func TestResolveConfig_TagFlag_NotFound(t *testing.T) {
-	dir := t.TempDir()
-	syncTag = "ghost"
-	t.Cleanup(func() { syncTag = "" })
+func TestResolveConfig_NameFlag_NotFound(t *testing.T) {
+	syncName = "ghost"
+	t.Cleanup(func() { syncName = "" })
 
-	_, _, err := resolveConfig(reader(""), dir)
-	if err == nil {
-		t.Error("expected error for missing tag, got nil")
+	store := make(syncConfigStore)
+	_, _, err := resolveConfig(reader(""), store, "/repo")
+	if !os.IsNotExist(err) {
+		t.Errorf("expected ErrNotExist, got %v", err)
 	}
 }

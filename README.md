@@ -42,18 +42,19 @@ Git-related utilities.
 
 Merges a set of **base branches** into each **child branch**, then pushes. Useful when multiple feature branches all need to stay in sync with a common set of upstream branches.
 
-Config is stored per-directory in `~/.belt/git-sync-child-branches/` so each repository can have its own setup.
+All configs are stored in `~/.belt/git-sync-child-branches.json`, keyed by directory path and config name. Multiple named configs can coexist in the same directory.
 
 **First run**
 
-On the first run in a directory, you will be prompted to configure base and child branches:
+On the first run in a directory, you will be prompted for a name, base branches, and child branches:
 
 ```
 $ belt git sync-child-branches
 No config found for this directory. Let's set it up.
+Config name (a short name to identify this config): my-config
 Base branches (comma-separated): main, feature-base
 Child branches (comma-separated): feature-a, feature-b, feature-c
-Config saved to ~/.belt/git-sync-child-branches/<id>.json
+Config "my-config" saved.
 ```
 
 After that, `belt git sync-child-branches` will run the full merge+push cycle without prompting.
@@ -63,6 +64,7 @@ After that, `belt git sync-child-branches` will run the full merge+push cycle wi
 | Flag | Description |
 |---|---|
 | _(none)_ | Run the merge+push cycle using the stored config |
+| `--name <name>` | Target a specific config by name |
 | `--list` | List the configured base and child branches |
 | `--add-branch <name>` | Add a branch to the child branches list |
 | `--add-current-branch` | Add the currently checked-out branch to the child branches list |
@@ -74,6 +76,9 @@ After that, `belt git sync-child-branches` will run the full merge+push cycle wi
 ```sh
 # Run the sync
 belt git sync-child-branches
+
+# Target a specific config by name
+belt git sync-child-branches --name my-config
 
 # See what's configured
 belt git sync-child-branches --list
@@ -95,4 +100,4 @@ belt git sync-child-branches --update
 
 ## CI/CD
 
-Pushing to `main` automatically creates a **draft release** on GitHub. When you publish the draft, binaries for Linux, macOS, and Windows (amd64) are built and attached to the release.
+Pushing to `main` automatically creates a **draft release** on GitHub. When you publish the draft, binaries for Linux (amd64), macOS (amd64 + arm64), and Windows (amd64) are built and attached to the release.
