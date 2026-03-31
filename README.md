@@ -10,11 +10,11 @@ Grab the latest binary for your platform from the [Releases](../../releases) pag
 
 ```sh
 # macOS
-curl -L https://github.com/mdeitos/cli-utility-belt/releases/latest/download/belt-darwin-amd64 -o belt
+curl -L https://github.com/mateusdeitos/cli-utility-belt/releases/latest/download/belt-darwin-arm64 -o belt
 chmod +x belt && mv belt /usr/local/bin/belt
 
 # Linux
-curl -L https://github.com/mdeitos/cli-utility-belt/releases/latest/download/belt-linux-amd64 -o belt
+curl -L https://github.com/mateusdeitos/cli-utility-belt/releases/latest/download/belt-linux-amd64 -o belt
 chmod +x belt && mv belt /usr/local/bin/belt
 ```
 
@@ -23,7 +23,7 @@ chmod +x belt && mv belt /usr/local/bin/belt
 Requires Go 1.22+.
 
 ```sh
-git clone https://github.com/mdeitos/cli-utility-belt.git
+git clone https://github.com/mateusdeitos/cli-utility-belt.git
 cd cli-utility-belt
 go build -o belt .
 ```

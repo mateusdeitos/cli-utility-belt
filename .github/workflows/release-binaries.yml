@@ -19,6 +19,9 @@ jobs:
           - goos: darwin
             goarch: amd64
             binary: belt-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            binary: belt-darwin-arm64
           - goos: windows
             goarch: amd64
             binary: belt-windows-amd64.exe
