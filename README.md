@@ -63,7 +63,8 @@ After that, `belt git sync-child-branches` will run the full merge+push cycle wi
 
 | Flag | Description |
 |---|---|
-| _(none)_ | Run the merge+push cycle using the stored config |
+| _(none)_ | Show the current config and hint |
+| `--run` | Run the merge+push cycle |
 | `--name <name>` | Target a specific config by name |
 | `--list` | List the configured base and child branches |
 | `--add-branch <name>` | Add a branch to the child branches list |
@@ -75,10 +76,10 @@ After that, `belt git sync-child-branches` will run the full merge+push cycle wi
 
 ```sh
 # Run the sync
-belt git sync-child-branches
+belt git sync-child-branches --run
 
-# Target a specific config by name
-belt git sync-child-branches --name my-config
+# Target a specific config by name and run
+belt git sync-child-branches --name my-config --run
 
 # See what's configured
 belt git sync-child-branches --list

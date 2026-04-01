@@ -28,6 +28,7 @@ var syncAddCurrentBranch bool
 var syncList bool
 var syncRemoveBranch string
 var syncName string
+var syncRun bool
 
 var syncChildBranchesCmd = &cobra.Command{
 	Use:   "sync-child-branches",
@@ -42,6 +43,7 @@ Use --name to target a specific config, --update to reconfigure.`,
 }
 
 func init() {
+	syncChildBranchesCmd.Flags().BoolVar(&syncRun, "run", false, "Run the merge+push cycle")
 	syncChildBranchesCmd.Flags().BoolVar(&syncUpdate, "update", false, "Re-prompt and update stored config")
 	syncChildBranchesCmd.Flags().StringVar(&syncAddBranch, "add-branch", "", "Add a branch to the child branches list")
 	syncChildBranchesCmd.Flags().BoolVar(&syncAddCurrentBranch, "add-current-branch", false, "Add the current git branch to the child branches list")
@@ -205,9 +207,28 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 	reader := bufio.NewReader(os.Stdin)
 	cfg, _, loadErr := resolveConfig(reader, store, cwd)
 
+	// Default behaviour (no flags): show config and hint.
+	if !syncList && !syncRun && !syncUpdate && syncRemoveBranch == "" && syncAddBranch == "" && !syncAddCurrentBranch {
+		if loadErr != nil {
+			fmt.Println("No config found for this directory. Run with --update to set it up.")
+			return nil
+		}
+		fmt.Printf("Name: %s\n", cfg.Name)
+		fmt.Println("Base branches:")
+		for _, b := range cfg.BaseBranches {
+			fmt.Printf("  - %s\n", b)
+		}
+		fmt.Println("Child branches:")
+		for _, b := range cfg.ChildBranches {
+			fmt.Printf("  - %s\n", b)
+		}
+		fmt.Println("\nRun with --run to execute the sync.")
+		return nil
+	}
+
 	if syncList {
 		if loadErr != nil {
-			return fmt.Errorf("no config found for this directory — run without flags first to set it up")
+			return fmt.Errorf("no config found for this directory — run with --update to set it up")
 		}
 		fmt.Printf("Name: %s\n", cfg.Name)
 		fmt.Println("Base branches:")
@@ -273,6 +294,10 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("saving config: %w", err)
 		}
 		fmt.Printf("Added %q to child branches.\n", syncAddBranch)
+		return nil
+	}
+
+	if !syncRun && !syncUpdate {
 		return nil
 	}
 
