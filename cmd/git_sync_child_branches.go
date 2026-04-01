@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,8 @@ type syncChildConfig struct {
 type syncConfigStore map[string]map[string]syncChildConfig
 
 var syncUpdate bool
+var syncNew bool
+var syncDel string
 var syncAddBranch string
 var syncAddCurrentBranch bool
 var syncList bool
@@ -44,6 +47,8 @@ Use --name to target a specific config, --update to reconfigure.`,
 
 func init() {
 	syncChildBranchesCmd.Flags().BoolVar(&syncRun, "run", false, "Run the merge+push cycle")
+	syncChildBranchesCmd.Flags().BoolVar(&syncNew, "new", false, "Create a new config for this directory")
+	syncChildBranchesCmd.Flags().StringVar(&syncDel, "del", "", "Delete a config by name")
 	syncChildBranchesCmd.Flags().BoolVar(&syncUpdate, "update", false, "Re-prompt and update stored config")
 	syncChildBranchesCmd.Flags().StringVar(&syncAddBranch, "add-branch", "", "Add a branch to the child branches list")
 	syncChildBranchesCmd.Flags().BoolVar(&syncAddCurrentBranch, "add-current-branch", false, "Add the current git branch to the child branches list")
@@ -102,6 +107,51 @@ func setConfig(store syncConfigStore, cwd string, cfg syncChildConfig) {
 		store[cwd] = make(map[string]syncChildConfig)
 	}
 	store[cwd][cfg.Name] = cfg
+}
+
+func getLocalBranches() ([]string, error) {
+	out, err := exec.Command("git", "branch", "--format=%(refname:short)").Output()
+	if err != nil {
+		return nil, err
+	}
+	var branches []string
+	for _, b := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if b = strings.TrimSpace(b); b != "" {
+			branches = append(branches, b)
+		}
+	}
+	return branches, nil
+}
+
+func selectBranches(title, description string, branches, preSelected []string) ([]string, error) {
+	var selected []string
+	options := make([]huh.Option[string], len(branches))
+	for i, b := range branches {
+		isPreSelected := false
+		for _, ps := range preSelected {
+			if ps == b {
+				isPreSelected = true
+				break
+			}
+		}
+		options[i] = huh.NewOption(b, b).Selected(isPreSelected)
+	}
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title(title).
+				Description(description).
+				Options(options...).
+				Validate(func(s []string) error {
+					if len(s) == 0 {
+						return fmt.Errorf("select at least one branch")
+					}
+					return nil
+				}).
+				Value(&selected),
+		),
+	).Run()
+	return selected, err
 }
 
 func promptLine(r *bufio.Reader, prompt string) (string, error) {
@@ -208,9 +258,9 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 	cfg, _, loadErr := resolveConfig(reader, store, cwd)
 
 	// Default behaviour (no flags): show config and hint.
-	if !syncList && !syncRun && !syncUpdate && syncRemoveBranch == "" && syncAddBranch == "" && !syncAddCurrentBranch {
+	if !syncList && !syncRun && !syncNew && !syncUpdate && syncDel == "" && syncRemoveBranch == "" && syncAddBranch == "" && !syncAddCurrentBranch {
 		if loadErr != nil {
-			fmt.Println("No config found for this directory. Run with --update to set it up.")
+			fmt.Println("No config found for this directory. Run with --new to set it up.")
 			return nil
 		}
 		fmt.Printf("Name: %s\n", cfg.Name)
@@ -228,7 +278,7 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 
 	if syncList {
 		if loadErr != nil {
-			return fmt.Errorf("no config found for this directory — run with --update to set it up")
+			return fmt.Errorf("no config found for this directory — run with --new to set it up")
 		}
 		fmt.Printf("Name: %s\n", cfg.Name)
 		fmt.Println("Base branches:")
@@ -239,6 +289,26 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 		for _, b := range cfg.ChildBranches {
 			fmt.Printf("  - %s\n", b)
 		}
+		fmt.Printf("\nStore: %s\n", storePath)
+		return nil
+	}
+
+	if syncDel != "" {
+		configs, ok := store[cwd]
+		if !ok {
+			return fmt.Errorf("config %q not found", syncDel)
+		}
+		if _, ok := configs[syncDel]; !ok {
+			return fmt.Errorf("config %q not found", syncDel)
+		}
+		delete(store[cwd], syncDel)
+		if len(store[cwd]) == 0 {
+			delete(store, cwd)
+		}
+		if err := saveStore(storePath, store); err != nil {
+			return fmt.Errorf("saving store: %w", err)
+		}
+		fmt.Printf("Config %q deleted.\n", syncDel)
 		return nil
 	}
 
@@ -297,19 +367,20 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if !syncRun && !syncUpdate {
+	if !syncRun && !syncNew && !syncUpdate {
 		return nil
 	}
 
-	if loadErr != nil || syncUpdate {
-		if loadErr != nil {
-			fmt.Println("No config found for this directory. Let's set it up.")
-		} else {
-			fmt.Printf("Updating config %q for this directory.\n", cfg.Name)
+	if syncNew || syncUpdate {
+		if syncUpdate && loadErr != nil {
+			return fmt.Errorf("no config found for this directory — run with --new to create one")
+		}
+		if syncUpdate {
+			fmt.Printf("Updating config %q.\n", cfg.Name)
 		}
 
 		name := syncName
-		if name == "" {
+		if syncNew && name == "" {
 			var err error
 			name, err = promptLine(reader, "Config name (a short name to identify this config): ")
 			if err != nil {
@@ -318,13 +389,26 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 			if name == "" {
 				return fmt.Errorf("name cannot be empty")
 			}
+		} else if syncUpdate {
+			name = cfg.Name
 		}
 
-		baseBranches, err := promptCSV(reader, "Base branches (comma-separated): ")
+		localBranches, err := getLocalBranches()
+		if err != nil {
+			return fmt.Errorf("listing git branches: %w", err)
+		}
+
+		var preBase, preChild []string
+		if syncUpdate && cfg != nil {
+			preBase = cfg.BaseBranches
+			preChild = cfg.ChildBranches
+		}
+
+		baseBranches, err := selectBranches("Base branches", "These branches will be merged into each child branch.", localBranches, preBase)
 		if err != nil {
 			return err
 		}
-		childBranches, err := promptCSV(reader, "Child branches (comma-separated): ")
+		childBranches, err := selectBranches("Child branches", "Each of these branches will receive merges from all base branches.", localBranches, preChild)
 		if err != nil {
 			return err
 		}

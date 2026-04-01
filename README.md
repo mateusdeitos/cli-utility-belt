@@ -65,12 +65,14 @@ After that, `belt git sync-child-branches` will run the full merge+push cycle wi
 |---|---|
 | _(none)_ | Show the current config and hint |
 | `--run` | Run the merge+push cycle |
+| `--new` | Create a new config for this directory |
+| `--del <name>` | Delete a config by name |
+| `--update` | Re-select branches for the current config |
 | `--name <name>` | Target a specific config by name |
-| `--list` | List the configured base and child branches |
+| `--list` | List the configured base and child branches (prints store path) |
 | `--add-branch <name>` | Add a branch to the child branches list |
 | `--add-current-branch` | Add the currently checked-out branch to the child branches list |
 | `--remove <name>` | Remove a branch from the child branches list |
-| `--update` | Re-prompt for base and child branches and overwrite the stored config |
 
 **Examples**
 
