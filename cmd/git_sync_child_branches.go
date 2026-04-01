@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +33,12 @@ var syncList bool
 var syncRemoveBranch string
 var syncName string
 var syncRun bool
+var syncVerbose bool
+
+var (
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00C853"))
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
+)
 
 var syncChildBranchesCmd = &cobra.Command{
 	Use:   "sync-child-branches",
@@ -47,6 +54,7 @@ Use --name to target a specific config, --update to reconfigure.`,
 
 func init() {
 	syncChildBranchesCmd.Flags().BoolVar(&syncRun, "run", false, "Run the merge+push cycle")
+	syncChildBranchesCmd.Flags().BoolVar(&syncVerbose, "verbose", false, "Show full git command output")
 	syncChildBranchesCmd.Flags().BoolVar(&syncNew, "new", false, "Create a new config for this directory")
 	syncChildBranchesCmd.Flags().StringVar(&syncDel, "del", "", "Delete a config by name")
 	syncChildBranchesCmd.Flags().BoolVar(&syncUpdate, "update", false, "Re-prompt and update stored config")
@@ -226,16 +234,69 @@ func resolveConfig(reader *bufio.Reader, store syncConfigStore, cwd string) (*sy
 	}
 }
 
+func printSuccess(msg string) {
+	fmt.Println(successStyle.Render("  ✓ " + msg))
+}
+
+func printGitError(msg string, gitOut string) {
+	fmt.Println(errorStyle.Render("  ✗ " + msg))
+	if gitOut != "" {
+		fmt.Println(errorStyle.Render("    " + strings.ReplaceAll(strings.TrimSpace(gitOut), "\n", "\n    ")))
+	}
+}
+
 func gitRun(args ...string) error {
 	c := exec.Command("git", args...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+	if syncVerbose {
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		return c.Run()
+	}
+	out, err := c.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func gitOutputStr(args ...string) (string, error) {
 	out, err := exec.Command("git", args...).Output()
 	return strings.TrimSpace(string(out)), err
+}
+
+// executeSyncForConfig runs the merge+push cycle for cfg without touching the current branch.
+func executeSyncForConfig(cfg *syncChildConfig) error {
+	if len(cfg.BaseBranches) == 0 {
+		return fmt.Errorf("no base branches configured — run with --update to reconfigure")
+	}
+	if len(cfg.ChildBranches) == 0 {
+		return fmt.Errorf("no child branches configured — run with --update to reconfigure")
+	}
+
+	for _, branch := range cfg.ChildBranches {
+		fmt.Printf("==> %s\n", branch)
+		if err := gitRun("checkout", branch); err != nil {
+			printGitError(fmt.Sprintf("checkout %s", branch), err.Error())
+			return fmt.Errorf("checkout %s: %w", branch, err)
+		}
+		for _, base := range cfg.BaseBranches {
+			if err := gitRun("merge", base, "--no-edit"); err != nil {
+				printGitError(fmt.Sprintf("merge %s into %s", base, branch), err.Error())
+				return fmt.Errorf("merge %s into %s: %w", base, branch, err)
+			}
+			if !syncVerbose {
+				printSuccess(fmt.Sprintf("merged %s", base))
+			}
+		}
+		if err := gitRun("push", "origin", branch); err != nil {
+			printGitError(fmt.Sprintf("push %s", branch), err.Error())
+			return fmt.Errorf("push %s: %w", branch, err)
+		}
+		if !syncVerbose {
+			printSuccess("pushed")
+		}
+	}
+	return nil
 }
 
 func runSyncChildBranches(_ *cobra.Command, _ []string) error {
@@ -426,33 +487,51 @@ func runSyncChildBranches(_ *cobra.Command, _ []string) error {
 		fmt.Printf("Config %q saved.\n\n", name)
 	}
 
-	if len(cfg.BaseBranches) == 0 {
-		return fmt.Errorf("no base branches configured — run with --update to reconfigure")
-	}
-	if len(cfg.ChildBranches) == 0 {
-		return fmt.Errorf("no child branches configured — run with --update to reconfigure")
-	}
-
 	currentBranch, err := gitOutputStr("rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return fmt.Errorf("getting current branch: %w", err)
 	}
 
-	for _, branch := range cfg.ChildBranches {
-		fmt.Printf("==> %s\n", branch)
-		if err := gitRun("checkout", branch); err != nil {
-			return fmt.Errorf("checkout %s: %w", branch, err)
+	ran := map[string]bool{}
+	for {
+		fmt.Printf("\nRunning config: %s\n", cfg.Name)
+		if err := executeSyncForConfig(cfg); err != nil {
+			gitRun("checkout", currentBranch)
+			return err
 		}
-		for _, base := range cfg.BaseBranches {
-			fmt.Printf("    merging %s\n", base)
-			if err := gitRun("merge", base, "--no-edit"); err != nil {
-				return fmt.Errorf("merge %s into %s: %w", base, branch, err)
+		ran[cfg.Name] = true
+
+		// Build list of configs not yet run in this chain.
+		var available []string
+		for _, n := range listNames(store, cwd) {
+			if !ran[n] {
+				available = append(available, n)
 			}
 		}
-		if err := gitRun("push", "origin", branch); err != nil {
-			return fmt.Errorf("push %s: %w", branch, err)
+		if len(available) == 0 {
+			break
 		}
-		fmt.Println("    done")
+
+		options := make([]huh.Option[string], len(available)+1)
+		for i, n := range available {
+			options[i] = huh.NewOption(n, n)
+		}
+		options[len(available)] = huh.NewOption("Done", "")
+
+		var next string
+		if err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Run another config?").
+					Options(options...).
+					Value(&next),
+			),
+		).Run(); err != nil || next == "" {
+			break
+		}
+
+		nextCfg := store[cwd][next]
+		cfg = &nextCfg
 	}
 
 	if err := gitRun("checkout", currentBranch); err != nil {
