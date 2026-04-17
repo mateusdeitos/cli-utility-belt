@@ -101,6 +101,40 @@ belt git sync-child-branches --update
 
 ---
 
+### `belt ecs`
+
+AWS ECS utilities.
+
+---
+
+#### `belt ecs env-export`
+
+Interactively selects an ECS cluster, service, and container, then exports its environment variables — including resolved SSM Parameter Store and Secrets Manager references — into a `.env` file.
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `-o, --output <path>` | Output file path (default: `.env.<service-name>`) |
+| `--profile <name>` | AWS profile to use (overrides `AWS_PROFILE`) |
+
+**Examples**
+
+```sh
+# Interactive export using the default AWS profile
+belt ecs env-export
+
+# Use a specific AWS profile
+belt ecs env-export --profile staging
+
+# Write to a custom file
+belt ecs env-export -o .env.local
+```
+
+The command resolves SSM and Secrets Manager ARNs concurrently (up to 5 at a time) and prints a success/failure line per secret.
+
+---
+
 ## CI/CD
 
 Pushing to `main` automatically creates a **draft release** on GitHub. When you publish the draft, binaries for Linux (amd64), macOS (amd64 + arm64), and Windows (amd64) are built and attached to the release.
