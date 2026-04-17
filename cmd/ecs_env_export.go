@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 var ecsEnvExportOutput string
@@ -172,18 +174,40 @@ func runEcsEnvExport(_ *cobra.Command, _ []string) error {
 		fmt.Println(infoStyle.Render(fmt.Sprintf("Resolving %d secret reference(s)...", secretCount)))
 	}
 
+	type result struct {
+		index int
+		value string
+		err   error
+	}
+	results := make([]result, 0, secretCount)
+	var mu sync.Mutex
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(5)
 	for i, e := range entries {
 		if !e.isSecret {
 			continue
 		}
-		ref := e.value
-		resolved, resolveErr := resolveSecretRef(ctx, ssmCli, smCli, ref)
-		if resolveErr != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ %s: %v", e.key, resolveErr)))
-			entries[i].value = "__UNRESOLVED__"
+		i, e := i, e
+		g.Go(func() error {
+			resolved, resolveErr := resolveSecretRef(gCtx, ssmCli, smCli, e.value)
+			mu.Lock()
+			results = append(results, result{index: i, value: resolved, err: resolveErr})
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	for _, r := range results {
+		if r.err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ %s: %v", entries[r.index].key, r.err)))
+			entries[r.index].value = "__UNRESOLVED__"
 		} else {
-			entries[i].value = resolved
-			fmt.Println(successStyle.Render("  ✓ " + e.key))
+			entries[r.index].value = r.value
+			fmt.Println(successStyle.Render("  ✓ " + entries[r.index].key))
 		}
 	}
 
